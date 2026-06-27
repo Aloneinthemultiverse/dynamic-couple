@@ -1,0 +1,41 @@
+# Dynamic couple config. Override per-env in local.yaml.
+roles:
+  planner: qwythos     # default PLANNER hat (open decision)
+  doer: gemma          # default DOER hat
+  swap_on_fails: 2     # arbiter: retry-once then swap
+  bail_on_fails: 3
+
+models:
+  qwythos:
+    path: /kaggle/input/qwythos-9b
+    device: cuda:0
+    quant: 4bit
+  gemma:
+    path: /kaggle/input/gemma-4-12b   # TODO push to Kaggle
+    device: cuda:1
+    quant: 4bit
+
+runtime:
+  attn_implementation: eager   # T4 sm_75: no flash-attn 2
+  compute_dtype: float16       # T4: no bf16
+  checkpoint_every: 1          # SWE-bench instances; session-resume
+
+budget:
+  max_steps: 40
+  max_swaps: 12
+  max_tokens: 400000
+
+channels:
+  pipeline_enabled: true       # edit #1 fallback drops to graph-only if unhealthy
+  confidence_gated: false      # edit #8 (later)
+
+check:
+  layers: [tests, kg]          # A + B; no model-judgment C
+  cache: true                  # edit #5
+
+eval:
+  benchmark: swe-bench
+  variant: in-process          # Docker-free (Kaggle forbids Docker)
+
+i18n:
+  detect_input_language: true  # edges only; loop stays language-neutral

@@ -1,0 +1,23 @@
+[project]
+name = "dynamic-couple"
+version = "0.1.0"
+description = "Qwythos-9B x Gemma 4 12B dynamic couple over a 3-namespace GitNexus graph + direct pipeline"
+requires-python = ">=3.10"
+dependencies = [
+    "transformers>=4.44",
+    "accelerate>=0.33",
+    "bitsandbytes>=0.43",   # 4-bit on T4
+    "torch>=2.2",
+    "datasets>=2.20",        # SWE-bench loading
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]

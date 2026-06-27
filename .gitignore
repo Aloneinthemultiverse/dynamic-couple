@@ -1,0 +1,17 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.ipynb_checkpoints/
+# never commit weights or secrets
+*.gguf
+*.safetensors
+*.bin
+kaggle.json
+.env
+# local run artifacts
+runs/
+checkpoints/
+*.log
