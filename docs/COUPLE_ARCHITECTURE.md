@@ -115,7 +115,7 @@ Docker per instance; Kaggle forbids Docker → use a **Docker-free / in-process*
   plan→do→check loop stays language-neutral (code is code).
 
 ## Open decisions
-- [ ] Who starts as PLANNER — Qwythos (default) or Gemma?
+- [x] Starting roles: **Gemma = PLANNER**, **Qwythos = DOER** (swap on double-fail).
 - [x] Localization = both (local-first Kaggle deploy + i18n).
 - [x] Eval = SWE-bench (Docker-free variant).
 - [ ] Push Gemma 4 12B to Kaggle as a Model.

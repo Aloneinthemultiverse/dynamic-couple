@@ -1,7 +1,7 @@
 # Dynamic couple config. Override per-env in local.yaml.
 roles:
-  planner: qwythos     # default PLANNER hat (open decision)
-  doer: gemma          # default DOER hat
+  planner: gemma       # starts as PLANNER (native thinking + multi-step tool calls)
+  doer: qwythos        # starts as DOER (Python-tuned, 1M ctx, uncensored)
   swap_on_fails: 2     # arbiter: retry-once then swap
   bail_on_fails: 3
 
