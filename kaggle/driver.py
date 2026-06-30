@@ -1,16 +1,15 @@
-# dynamic-couple | Kaggle T4x2 — REAL couple loop (plan -> do -> check -> swap)
-# Gemma 4 12B = PLANNER (GPU1), Qwythos-9B = DOER (GPU0). Roles are hats that SWAP on
-# double-fail. CHECK-A = run the candidate against HumanEval unit tests (objective gate).
-# CHECK-B (GitNexus KG) is local/MCP, not available on Kaggle -> tests are the gate here.
-# Self-contained (no package import) so it runs as a single Kaggle script kernel.
-import os, re, subprocess, sys, tempfile, json, time
+# dynamic-couple | Kaggle T4x2 — couple loop on SWE-bench Lite (in-process, Docker-free)
+# Gemma 4 12B = PLANNER (GPU1), Qwythos-9B = DOER (GPU0). Roles SWAP on double-fail.
+# CHECK-A = run the instance's FAIL_TO_PASS tests in the installed repo (objective gate).
+# Docker-free: clone repo @ base_commit, pip install -e, apply couple edit, run target tests.
+# Repo/env setup is flaky on Kaggle -> env-setup failures recorded SEPARATELY from solve fails.
+import os, re, subprocess, sys, json, time, shutil, pathlib
 
-def sh(c): print("$", c, flush=True); return subprocess.run(c, shell=True)
+def sh(c, **k): print("$", c, flush=True); return subprocess.run(c, shell=True, **k)
 
 print("=== GPU ===", flush=True)
 sh("nvidia-smi --query-gpu=index,name,memory.total --format=csv || true")
-
-print("\n=== install (prebuilt cu124 wheel) ===", flush=True)
+print("\n=== install ===", flush=True)
 sh("pip -q install huggingface_hub datasets")
 sh("pip -q install 'llama-cpp-python[server]' "
    "--extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cu124")
@@ -19,9 +18,10 @@ from huggingface_hub import hf_hub_download, list_repo_files
 from llama_cpp import Llama
 from datasets import load_dataset
 
-QWY_REPO = os.environ.get("QWY_REPO", "empero-ai/Qwythos-9B-Claude-Mythos-5-1M-GGUF")
+QWY_REPO   = os.environ.get("QWY_REPO", "empero-ai/Qwythos-9B-Claude-Mythos-5-1M-GGUF")
 GEMMA_REPO = os.environ.get("GEMMA_REPO", "ggml-org/gemma-4-12B-it-GGUF")
-N_PROBLEMS = int(os.environ.get("N_PROBLEMS", "10"))
+N_INST     = int(os.environ.get("N_INST", "3"))
+WORK = pathlib.Path("/kaggle/working/repos"); WORK.mkdir(parents=True, exist_ok=True)
 
 def pick_gguf(repo, prefer="q4_k_m"):
     fs = [f for f in list_repo_files(repo) if f.lower().endswith(".gguf")]
@@ -29,88 +29,113 @@ def pick_gguf(repo, prefer="q4_k_m"):
     pick = (pref or fs)[0]; print("  ", repo, "->", pick, flush=True)
     return hf_hub_download(repo, pick)
 
-print("\n=== load both models ===", flush=True)
-# n_ctx=4096: Gemma's SWA/iswa cache pads V cache and OOMs a 15GB T4 at 8192 (proven 4096 OK)
-QWY = Llama(model_path=pick_gguf(QWY_REPO), n_gpu_layers=-1, n_ctx=4096, main_gpu=0, verbose=False)
+print("\n=== load both models (n_ctx=4096; Gemma SWA OOMs at 8192 on T4) ===", flush=True)
+QWY = Llama(model_path=pick_gguf(QWY_REPO),   n_gpu_layers=-1, n_ctx=4096, main_gpu=0, verbose=False)
 GEM = Llama(model_path=pick_gguf(GEMMA_REPO), n_gpu_layers=-1, n_ctx=4096, main_gpu=1, verbose=False)
 MODELS = {"qwythos": QWY, "gemma": GEM}
 
-def chat(model_key, system, user, max_tokens=1024, temp=0.2):
-    out = MODELS[model_key].create_chat_completion(
+def chat(key, system, user, max_tokens=1024, temp=0.2):
+    o = MODELS[key].create_chat_completion(
         messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
         max_tokens=max_tokens, temperature=temp)
-    return out["choices"][0]["message"]["content"]
+    return o["choices"][0]["message"]["content"]
 
-def extract_code(text):
-    m = re.search(r"```(?:python)?\s*(.*?)```", text, re.DOTALL)
-    return (m.group(1) if m else text).strip()
+# --- edit format: SEARCH/REPLACE blocks (reliable for small models, unlike raw diffs) ---
+PLANNER_SYS = ("You are the PLANNER in a two-model coding couple fixing a real bug. "
+               "Given an issue and the relevant file, output a SHORT numbered plan (3-5 steps) "
+               "naming the exact function/lines to change. No code.")
+DOER_SYS = ("You are the DOER. Produce ONE edit as a SEARCH/REPLACE block, exactly:\n"
+            "<<<<<<< SEARCH\n<exact existing code>\n=======\n<new code>\n>>>>>>> REPLACE\n"
+            "The SEARCH text must match the file byte-for-byte. Output only the block.")
 
-# --- roles (hats), default: Gemma plans, Qwythos does ---
-PLANNER_SYS = ("You are the PLANNER in a two-model coding couple. Given a function stub, "
-               "produce a SHORT numbered implementation plan (3-5 steps). No code, just the plan.")
-DOER_SYS = ("You are the DOER in a two-model coding couple. Implement the function. "
-            "Return ONLY a Python code block with the complete function. No prose.")
+def apply_search_replace(file_text, block):
+    m = re.search(r"<<<<<<< SEARCH\n(.*?)\n=======\n(.*?)\n>>>>>>> REPLACE", block, re.DOTALL)
+    if not m: return None, "no SEARCH/REPLACE block produced"
+    search, replace = m.group(1), m.group(2)
+    if search not in file_text: return None, "SEARCH text not found in file (no byte match)"
+    return file_text.replace(search, replace, 1), None
 
-def plan(planner_key, prompt):
-    return chat(planner_key, PLANNER_SYS, f"Function to implement:\n{prompt}", max_tokens=400)
+def read(p):
+    try: return pathlib.Path(p).read_text(encoding="utf-8", errors="replace")
+    except Exception: return ""
 
-def do(doer_key, prompt, plan_text, hint):
-    u = f"Function stub:\n{prompt}\n\nPlan:\n{plan_text}"
-    if hint: u += f"\n\nThe previous attempt FAILED with:\n{hint}\nFix it."
-    return extract_code(chat(doer_key, DOER_SYS, u, max_tokens=1024))
+def target_file_from_patch(gold_patch):
+    m = re.search(r"^\+\+\+ b/(.+)$", gold_patch, re.MULTILINE)
+    return m.group(1) if m else None
 
-def check_A(candidate, test_code, entry_point):
-    """Objective gate: run candidate + HumanEval test in a subprocess."""
-    src = candidate + "\n\n" + test_code + f"\n\ncheck({entry_point})\n"
-    with tempfile.NamedTemporaryFile("w", suffix=".py", delete=False) as f:
-        f.write(src); path = f.name
-    try:
-        r = subprocess.run([sys.executable, path], capture_output=True, text=True, timeout=20)
-        ok = (r.returncode == 0)
-        return ok, ("" if ok else (r.stderr.strip()[-400:] or "assertion failed"))
-    except subprocess.TimeoutExpired:
-        return False, "timeout"
-    finally:
-        os.unlink(path)
+def setup_repo(inst):
+    """clone @ base_commit, editable install. Returns repo_dir or raises (env failure)."""
+    rid = inst["instance_id"].replace("/", "__")
+    d = WORK / rid
+    if d.exists(): shutil.rmtree(d)
+    url = f"https://github.com/{inst['repo']}.git"
+    sh(f"git clone -q {url} {d}", check=True, timeout=300)
+    sh(f"git -C {d} checkout -q {inst['base_commit']}", check=True, timeout=120)
+    sh(f"pip -q install -e {d} 2>/dev/null || true", timeout=600)  # best-effort dep install
+    return d
 
-# --- the loop: plan -> do -> check -> swap ---
-def solve(problem):
-    prompt, test, ep = problem["prompt"], problem["test"], problem["entry_point"]
-    planner, doer = "gemma", "qwythos"          # starting hats
-    p = plan(planner, prompt)
-    fails, hint, trace = 0, None, []
+def run_tests(repo_dir, fail_to_pass):
+    """CHECK-A: run the FAIL_TO_PASS tests. Pass iff all selected tests pass."""
+    tests = json.loads(fail_to_pass) if isinstance(fail_to_pass, str) else fail_to_pass
+    if not tests: return False, "no FAIL_TO_PASS tests"
+    r = subprocess.run([sys.executable, "-m", "pytest", "-x", "-q", *tests],
+                       cwd=repo_dir, capture_output=True, text=True, timeout=600)
+    ok = (r.returncode == 0)
+    return ok, ("" if ok else (r.stdout + r.stderr)[-600:])
+
+def solve(inst, repo_dir):
+    tgt = target_file_from_patch(inst["patch"])          # the file the gold patch touches
+    if not tgt: return False, [{"err": "no target file in gold patch"}]
+    fpath = repo_dir / tgt
+    issue = inst["problem_statement"][:3000]
+    planner, doer = "gemma", "qwythos"; fails, hint, trace = 0, None, []
+    plan = chat(planner, PLANNER_SYS, f"Issue:\n{issue}\n\nFile {tgt}:\n{read(fpath)[:4000]}", 400)
     while True:
-        cand = do(doer, prompt, p, hint)
-        ok, err = check_A(cand, test, ep)
-        trace.append({"doer": doer, "planner": planner, "ok": ok, "err": err[:120]})
-        if ok:
-            return True, trace
+        u = (f"Issue:\n{issue}\n\nFile {tgt}:\n{read(fpath)[:6000]}\n\nPlan:\n{plan}")
+        if hint: u += f"\n\nPrevious edit FAILED:\n{hint}\nFix it."
+        block = chat(doer, DOER_SYS, u, 800)
+        orig = read(fpath); new, aerr = apply_search_replace(orig, block)
+        if new is None:
+            ok, err = False, aerr
+        else:
+            fpath.write_text(new, encoding="utf-8")
+            ok, err = run_tests(repo_dir, inst["FAIL_TO_PASS"])
+            if not ok: fpath.write_text(orig, encoding="utf-8")  # revert failed edit
+        trace.append({"doer": doer, "planner": planner, "ok": ok, "err": err[:150]})
+        if ok: return True, trace
         fails += 1; hint = err
-        if fails == 1:
-            continue                             # retry, same hats, with hint
+        if fails == 1: continue
         if fails == 2:
-            planner, doer = doer, planner        # SWAP hats
-            p = plan(planner, prompt)            # incremental re-plan from new planner
+            planner, doer = doer, planner
+            plan = chat(planner, PLANNER_SYS, f"Issue:\n{issue}\n\nFile {tgt}:\n{read(fpath)[:4000]}", 400)
             continue
-        return False, trace                      # bail after 3
+        return False, trace
 
-print(f"\n=== couple run on {N_PROBLEMS} HumanEval problems ===", flush=True)
-ds = load_dataset("openai_humaneval")["test"]
-passed, swaps_used, rows = 0, 0, []
-t0 = time.time()
-for i in range(min(N_PROBLEMS, len(ds))):
-    ok, trace = solve(ds[i])
-    used_swap = any(t["planner"] == "qwythos" for t in trace)
-    swaps_used += int(used_swap)
-    passed += int(ok)
-    rows.append({"task": ds[i]["task_id"], "ok": ok, "attempts": len(trace), "swapped": used_swap})
-    print(f"  {ds[i]['task_id']}: {'PASS' if ok else 'FAIL'} "
-          f"({len(trace)} attempts{', SWAPPED' if used_swap else ''})", flush=True)
+print(f"\n=== couple on {N_INST} SWE-bench Lite instances ===", flush=True)
+ds = load_dataset("princeton-nlp/SWE-bench_Lite")["test"]
+solved = env_fail = swaps = 0; rows = []; t0 = time.time()
+for i in range(min(N_INST, len(ds))):
+    inst = ds[i]; iid = inst["instance_id"]
+    try:
+        rd = setup_repo(inst)
+    except Exception as e:
+        env_fail += 1; rows.append({"id": iid, "result": "ENV_FAIL", "why": str(e)[:120]})
+        print(f"  {iid}: ENV_FAIL ({str(e)[:80]})", flush=True); continue
+    try:
+        ok, trace = solve(inst, rd)
+    except Exception as e:
+        ok, trace = False, [{"err": f"solve crash: {e}"}]
+    used_swap = any(t.get("planner") == "qwythos" for t in trace)
+    swaps += int(used_swap); solved += int(ok)
+    rows.append({"id": iid, "result": "PASS" if ok else "FAIL",
+                 "attempts": len(trace), "swapped": used_swap})
+    print(f"  {iid}: {'PASS' if ok else 'FAIL'} ({len(trace)} attempts"
+          f"{', SWAPPED' if used_swap else ''})", flush=True)
 
-dur = time.time() - t0
-print(f"\n*** COUPLE pass@1: {passed}/{N_PROBLEMS} = {100*passed/N_PROBLEMS:.1f}%  "
-      f"| swaps used on {swaps_used} problems | {dur:.0f}s ***", flush=True)
-with open("/kaggle/working/couple_results.json", "w") as f:
-    json.dump({"passed": passed, "n": N_PROBLEMS, "swaps_used": swaps_used,
-               "seconds": dur, "rows": rows}, f, indent=2)
-print("saved /kaggle/working/couple_results.json", flush=True)
+dur = time.time() - t0; attempted = N_INST - env_fail
+print(f"\n*** SWE-bench Lite: solved {solved}/{attempted} attempted "
+      f"({env_fail} env-setup failures) | swaps on {swaps} | {dur:.0f}s ***", flush=True)
+with open("/kaggle/working/swe_results.json", "w") as f:
+    json.dump({"solved": solved, "attempted": attempted, "env_fail": env_fail,
+               "swaps": swaps, "seconds": dur, "rows": rows}, f, indent=2)
+print("saved /kaggle/working/swe_results.json", flush=True)
