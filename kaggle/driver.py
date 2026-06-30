@@ -9,9 +9,10 @@ def sh(c): subprocess.run(c, shell=True, check=True)
 print("=== GPU visibility ===", flush=True)
 sh("nvidia-smi --query-gpu=index,name,memory.total --format=csv || true")
 
-print("\n=== install llama-cpp-python (CUDA) ===", flush=True)
-os.environ["CMAKE_ARGS"] = "-DGGML_CUDA=on"
-sh("pip -q install huggingface_hub llama-cpp-python")
+print("\n=== install llama-cpp-python (prebuilt CUDA 12.4 wheel — no source build) ===", flush=True)
+sh("pip -q install huggingface_hub")
+sh("pip -q install 'llama-cpp-python[server]' "
+   "--extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cu124")
 
 from huggingface_hub import hf_hub_download, list_repo_files
 from llama_cpp import Llama
