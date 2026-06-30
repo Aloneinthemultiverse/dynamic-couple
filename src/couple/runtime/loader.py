@@ -10,7 +10,7 @@ from __future__ import annotations
 import os
 
 QWY_REPO = os.environ.get("QWY_REPO", "empero-ai/Qwythos-9B-Claude-Mythos-5-1M-GGUF")
-GEMMA_REPO = os.environ.get("GEMMA_REPO", "")  # TODO: pick a Gemma-4-12B GGUF HF repo
+GEMMA_REPO = os.environ.get("GEMMA_REPO", "ggml-org/gemma-4-12B-it-GGUF")
 
 
 def _pick_gguf(repo: str, prefer: str = "q4"):

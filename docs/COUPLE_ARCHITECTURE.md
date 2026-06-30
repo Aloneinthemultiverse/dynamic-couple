@@ -24,7 +24,7 @@ Roles **swap on double-fail**; incoming model rehydrates from the **shared** gra
 - ~12h session cap + weekly quota → **session checkpoint/resume** (edit #2).
 - Repos:
   - Qwythos-9B: `empero-ai/Qwythos-9B-Claude-Mythos-5-1M-GGUF` ✅ (proven)
-  - Gemma 4 12B: **needs a GGUF HF repo id** ⛔ (same download path — NO Kaggle upload needed)
+  - Gemma 4 12B: `ggml-org/gemma-4-12B-it-GGUF` ✅ (same download path — NO Kaggle upload)
 - Kaggle kernel: `sujitnarrayanm/dynamic-couple-driver` (private, GPU, internet).
 
 ---
@@ -120,4 +120,4 @@ Docker per instance; Kaggle forbids Docker → use a **Docker-free / in-process*
 - [x] Starting roles: **Gemma = PLANNER**, **Qwythos = DOER** (swap on double-fail).
 - [x] Localization = both (local-first Kaggle deploy + i18n).
 - [x] Eval = SWE-bench (Docker-free variant).
-- [ ] Pick a Gemma 4 12B GGUF HuggingFace repo (loads at runtime; no Kaggle upload needed).
+- [x] Gemma 4 12B GGUF repo = `ggml-org/gemma-4-12B-it-GGUF`.

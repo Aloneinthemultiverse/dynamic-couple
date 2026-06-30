@@ -7,13 +7,13 @@ roles:
 
 models:
   qwythos:
-    path: /kaggle/input/qwythos-9b
-    device: cuda:0
-    quant: 4bit
+    repo: empero-ai/Qwythos-9B-Claude-Mythos-5-1M-GGUF   # GGUF from HF at runtime
+    gpu: 0
+    quant: q4
   gemma:
-    path: /kaggle/input/gemma-4-12b   # TODO push to Kaggle
-    device: cuda:1
-    quant: 4bit
+    repo: ggml-org/gemma-4-12B-it-GGUF                    # GGUF from HF at runtime
+    gpu: 1
+    quant: q4
 
 runtime:
   attn_implementation: eager   # T4 sm_75: no flash-attn 2

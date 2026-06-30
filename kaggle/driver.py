@@ -1,37 +1,42 @@
-# dynamic-couple | Kaggle T4x2 runtime SMOKE TEST
+# dynamic-couple | Kaggle T4x2 runtime SMOKE TEST (both models)
 # Validates the runtime before the full couple loop: GPU visibility, GGUF download,
-# llama.cpp load on GPU, one short generation. Mirrors the proven qwythos-solo setup.
-# Qwythos = GGUF from HuggingFace (NOT a Kaggle mount); Gemma will load the same way.
-import os, subprocess, sys
+# llama.cpp load of BOTH models (one per T4), one short generation each.
+# GGUF from HuggingFace at runtime (NOT Kaggle mounts). Qwythos=DOER, Gemma=PLANNER.
+import os, subprocess
 
 def sh(c): subprocess.run(c, shell=True, check=True)
 
 print("=== GPU visibility ===", flush=True)
 sh("nvidia-smi --query-gpu=index,name,memory.total --format=csv || true")
 
-# llama.cpp python bindings with CUDA (T4 = sm_75; no flash-attn 2 needed for GGUF)
 print("\n=== install llama-cpp-python (CUDA) ===", flush=True)
 os.environ["CMAKE_ARGS"] = "-DGGML_CUDA=on"
-sh("pip -q install huggingface_hub llama-cpp-python || pip -q install huggingface_hub llama-cpp-python")
+sh("pip -q install huggingface_hub llama-cpp-python")
 
 from huggingface_hub import hf_hub_download, list_repo_files
-QWY_REPO = os.environ.get("QWY_REPO", "empero-ai/Qwythos-9B-Claude-Mythos-5-1M-GGUF")
+from llama_cpp import Llama
 
-def pick_gguf(repo):
+QWY_REPO = os.environ.get("QWY_REPO", "empero-ai/Qwythos-9B-Claude-Mythos-5-1M-GGUF")
+GEMMA_REPO = os.environ.get("GEMMA_REPO", "ggml-org/gemma-4-12B-it-GGUF")
+
+def pick_gguf(repo, prefer="q4"):
     files = [f for f in list_repo_files(repo) if f.lower().endswith(".gguf")]
-    # prefer a Q4 quant to fit a single T4 (16GB)
-    q4 = [f for f in files if "q4" in f.lower()]
-    pick = (q4 or files)[0]
+    pref = [f for f in files if prefer in f.lower()]
+    pick = (pref or files)[0]
     print("  ", repo, "->", pick, flush=True)
     return hf_hub_download(repo, pick)
 
-print("\n=== download Qwythos GGUF ===", flush=True)
-path = pick_gguf(QWY_REPO)
+def load_and_probe(repo, gpu, prompt):
+    print(f"\n=== load {repo} on GPU{gpu} ===", flush=True)
+    path = pick_gguf(repo)
+    llm = Llama(model_path=path, n_gpu_layers=-1, n_ctx=4096, main_gpu=gpu, verbose=False)
+    out = llm(prompt, max_tokens=128)
+    print(out["choices"][0]["text"], flush=True)
+    return llm
 
-print("\n=== load on GPU0 + smoke generation ===", flush=True)
-from llama_cpp import Llama
-llm = Llama(model_path=path, n_gpu_layers=-1, n_ctx=4096, main_gpu=0, verbose=False)
-out = llm("Write a Python function that returns the nth Fibonacci number.\n", max_tokens=128)
-print(out["choices"][0]["text"], flush=True)
-print("\n*** SMOKE TEST OK — Qwythos GGUF loads + generates on T4. "
-      "Next: add Gemma on GPU1 + wire couple loop. ***", flush=True)
+# DOER on GPU0, PLANNER on GPU1 — proves both T4s independently
+load_and_probe(QWY_REPO, 0, "Write a Python function that returns the nth Fibonacci number.\n")
+load_and_probe(GEMMA_REPO, 1, "Break this task into 3 numbered steps: add a CSV export endpoint.\n")
+
+print("\n*** SMOKE TEST OK — both GGUF models load + generate on T4x2. "
+      "Next: wire couple loop (controller.py) + SWE-bench in-process runner. ***", flush=True)
