@@ -30,8 +30,9 @@ def pick_gguf(repo, prefer="q4_k_m"):
     return hf_hub_download(repo, pick)
 
 print("\n=== load both models ===", flush=True)
-QWY = Llama(model_path=pick_gguf(QWY_REPO), n_gpu_layers=-1, n_ctx=8192, main_gpu=0, verbose=False)
-GEM = Llama(model_path=pick_gguf(GEMMA_REPO), n_gpu_layers=-1, n_ctx=8192, main_gpu=1, verbose=False)
+# n_ctx=4096: Gemma's SWA/iswa cache pads V cache and OOMs a 15GB T4 at 8192 (proven 4096 OK)
+QWY = Llama(model_path=pick_gguf(QWY_REPO), n_gpu_layers=-1, n_ctx=4096, main_gpu=0, verbose=False)
+GEM = Llama(model_path=pick_gguf(GEMMA_REPO), n_gpu_layers=-1, n_ctx=4096, main_gpu=1, verbose=False)
 MODELS = {"qwythos": QWY, "gemma": GEM}
 
 def chat(model_key, system, user, max_tokens=1024, temp=0.2):
