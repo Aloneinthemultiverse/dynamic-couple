@@ -1,18 +1,29 @@
-"""Kaggle T4×2 in-process loader. 4-bit, fp16 compute, eager attention (Turing sm_75).
+"""Kaggle T4×2 in-process loader — GGUF + llama.cpp (NOT transformers/bitsandbytes).
 
-One model per GPU. Weights mounted read-only from Kaggle Models at /kaggle/input/.
-  Qwythos-9B  -> cuda:0   (already on Kaggle)
-  Gemma 4 12B -> cuda:1   (MUST be pushed as a Kaggle Model first)
+Proven by the qwythos-solo kernel: models are GGUF, downloaded from HuggingFace at runtime
+(enable_internet), loaded with llama-cpp-python on GPU. One model per T4.
+  Qwythos-9B -> GPU0  (empero-ai/Qwythos-9B-Claude-Mythos-5-1M-GGUF) — already proven
+  Gemma 4 12B -> GPU1 (needs a GGUF HF repo id — same download path, no Kaggle upload)
+T4 = Turing sm_75: GGUF/llama.cpp sidesteps the bf16 / flash-attn 2 limits entirely.
 """
 from __future__ import annotations
+import os
 
-QWYTHOS_PATH = "/kaggle/input/qwythos-9b"      # confirm exact dataset slug
-GEMMA_PATH = "/kaggle/input/gemma-4-12b"        # TODO: push this Model to Kaggle
+QWY_REPO = os.environ.get("QWY_REPO", "empero-ai/Qwythos-9B-Claude-Mythos-5-1M-GGUF")
+GEMMA_REPO = os.environ.get("GEMMA_REPO", "")  # TODO: pick a Gemma-4-12B GGUF HF repo
 
 
-def load_4bit(path: str, device: str):
-    """Load a model in 4-bit on the given T4. fp16 compute, attn_implementation='eager'."""
-    raise NotImplementedError(
-        "transformers BitsAndBytesConfig(load_in_4bit=True, bnb_4bit_compute_dtype=fp16); "
-        "device_map={'': device}; attn_implementation='eager'  (T4 = no flash-attn 2)"
-    )
+def _pick_gguf(repo: str, prefer: str = "q4"):
+    from huggingface_hub import hf_hub_download, list_repo_files
+    files = [f for f in list_repo_files(repo) if f.lower().endswith(".gguf")]
+    pref = [f for f in files if prefer in f.lower()]
+    pick = (pref or files)[0]
+    return hf_hub_download(repo, pick)
+
+
+def load(repo: str, main_gpu: int, n_ctx: int = 8192):
+    """Download a GGUF from HF and load it on the given T4 via llama.cpp."""
+    from llama_cpp import Llama
+    path = _pick_gguf(repo)
+    return Llama(model_path=path, n_gpu_layers=-1, n_ctx=n_ctx,
+                 main_gpu=main_gpu, verbose=False)

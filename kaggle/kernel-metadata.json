@@ -1,5 +1,5 @@
 {
-  "id": "aloneinthemultiverse/dynamic-couple-driver",
+  "id": "sujitnarrayanm/dynamic-couple-driver",
   "title": "dynamic-couple-driver",
   "code_file": "driver.py",
   "language": "python",
@@ -7,10 +7,9 @@
   "is_private": true,
   "enable_gpu": true,
   "enable_internet": true,
+  "keywords": ["gpu"],
   "dataset_sources": [],
-  "model_sources": [
-    "aloneinthemultiverse/qwythos-9b",
-    "aloneinthemultiverse/gemma-4-12b"
-  ],
-  "kernel_sources": []
+  "kernel_sources": [],
+  "competition_sources": [],
+  "model_sources": []
 }

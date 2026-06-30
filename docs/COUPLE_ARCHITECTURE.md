@@ -15,15 +15,17 @@
 
 Roles **swap on double-fail**; incoming model rehydrates from the **shared** graph namespace.
 
-**Runtime = Kaggle T4×2:**
-- 2× T4 = 32 GB VRAM. fp16 won't fit (9B+12B ≈ 42GB) → **4-bit quant** (~14GB) fits.
-- **One model per GPU:** Qwythos→`cuda:0`, Gemma→`cuda:1` (also enables edit #4 parallelism).
-- **In-process load** (transformers/llama.cpp) — no persistent servers (Kaggle has none).
-- T4 = Turing (sm_75): **no bf16, no flash-attn 2** → fp16 + eager attention.
+**Runtime = Kaggle T4×2 (GGUF + llama.cpp — proven by qwythos-solo kernel):**
+- Models are **GGUF**, downloaded from **HuggingFace at runtime** (`enable_internet`), loaded
+  with `llama-cpp-python` on GPU. NOT transformers/bitsandbytes, NOT Kaggle Model mounts.
+- **Q4 GGUF** fits one T4 (16GB). **One model per GPU:** Qwythos→GPU0, Gemma→GPU1
+  (also enables edit #4 parallelism).
+- GGUF/llama.cpp sidesteps T4 Turing (sm_75) limits (no bf16 / flash-attn 2 needed).
 - ~12h session cap + weekly quota → **session checkpoint/resume** (edit #2).
-- Weights mounted read-only from Kaggle Models at `/kaggle/input/...`.
-  - Qwythos-9B: already on Kaggle ✅
-  - Gemma 4 12B: **must be pushed as a Kaggle Model** ⛔ (todo)
+- Repos:
+  - Qwythos-9B: `empero-ai/Qwythos-9B-Claude-Mythos-5-1M-GGUF` ✅ (proven)
+  - Gemma 4 12B: **needs a GGUF HF repo id** ⛔ (same download path — NO Kaggle upload needed)
+- Kaggle kernel: `sujitnarrayanm/dynamic-couple-driver` (private, GPU, internet).
 
 ---
 
@@ -118,4 +120,4 @@ Docker per instance; Kaggle forbids Docker → use a **Docker-free / in-process*
 - [x] Starting roles: **Gemma = PLANNER**, **Qwythos = DOER** (swap on double-fail).
 - [x] Localization = both (local-first Kaggle deploy + i18n).
 - [x] Eval = SWE-bench (Docker-free variant).
-- [ ] Push Gemma 4 12B to Kaggle as a Model.
+- [ ] Pick a Gemma 4 12B GGUF HuggingFace repo (loads at runtime; no Kaggle upload needed).
