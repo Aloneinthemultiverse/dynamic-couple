@@ -1,14 +1,29 @@
-# dynamic-couple | Kaggle T4x2 — couple loop on SWE-bench Lite (in-process, Docker-free)
-# Gemma 4 12B = PLANNER (GPU1), Qwythos-9B = DOER (GPU0). Roles SWAP on double-fail.
+# dynamic-couple | Kaggle — couple loop on SWE-bench Lite (in-process, Docker-free)
+# Gemma 4 12B = PLANNER, Qwythos-9B = DOER. Roles SWAP on double-fail.
 # CHECK-A = run the instance's FAIL_TO_PASS tests in the installed repo (objective gate).
-# Docker-free: clone repo @ base_commit, pip install -e, apply couple edit, run target tests.
-# Repo/env setup is flaky on Kaggle -> env-setup failures recorded SEPARATELY from solve fails.
+# No API key needed: SWE-bench Lite is a HuggingFace dataset.
+# GPU auto-detect: T4x2 -> one model per GPU; single GPU -> both on GPU0.
 import os, re, subprocess, sys, json, time, shutil, pathlib
+
+# ---------------- CONFIG (tune here) ----------------
+# CONTEXT LENGTH REALITY on 15GB T4: KV cache grows linearly with ctx. 256k is impossible
+# (needs ~hundreds of GB). Gemma OOMs above ~4k, Qwythos handles ~8k. Raise only if you
+# have a bigger GPU (A100/H100 80GB can do 128k-256k). These are per-model:
+QWY_CTX   = int(os.environ.get("QWY_CTX", "8192"))
+GEM_CTX   = int(os.environ.get("GEM_CTX", "4096"))
+N_INST    = int(os.environ.get("N_INST", "3"))
+QWY_REPO  = os.environ.get("QWY_REPO",   "empero-ai/Qwythos-9B-Claude-Mythos-5-1M-GGUF")
+GEMMA_REPO= os.environ.get("GEMMA_REPO", "ggml-org/gemma-4-12B-it-GGUF")
+# ----------------------------------------------------
 
 def sh(c, **k): print("$", c, flush=True); return subprocess.run(c, shell=True, **k)
 
 print("=== GPU ===", flush=True)
-sh("nvidia-smi --query-gpu=index,name,memory.total --format=csv || true")
+gpus = sh("nvidia-smi -L", capture_output=True, text=True).stdout
+n_gpu = len([l for l in gpus.splitlines() if l.strip()])
+print(gpus, f"-> {n_gpu} GPU(s)", flush=True)
+QWY_GPU, GEM_GPU = (0, 1) if n_gpu >= 2 else (0, 0)
+
 print("\n=== install ===", flush=True)
 sh("pip -q install huggingface_hub datasets")
 sh("pip -q install 'llama-cpp-python[server]' "
@@ -18,9 +33,6 @@ from huggingface_hub import hf_hub_download, list_repo_files
 from llama_cpp import Llama
 from datasets import load_dataset
 
-QWY_REPO   = os.environ.get("QWY_REPO", "empero-ai/Qwythos-9B-Claude-Mythos-5-1M-GGUF")
-GEMMA_REPO = os.environ.get("GEMMA_REPO", "ggml-org/gemma-4-12B-it-GGUF")
-N_INST     = int(os.environ.get("N_INST", "3"))
 WORK = pathlib.Path("/kaggle/working/repos"); WORK.mkdir(parents=True, exist_ok=True)
 
 def pick_gguf(repo, prefer="q4_k_m"):
@@ -29,9 +41,9 @@ def pick_gguf(repo, prefer="q4_k_m"):
     pick = (pref or fs)[0]; print("  ", repo, "->", pick, flush=True)
     return hf_hub_download(repo, pick)
 
-print("\n=== load both models (n_ctx=4096; Gemma SWA OOMs at 8192 on T4) ===", flush=True)
-QWY = Llama(model_path=pick_gguf(QWY_REPO),   n_gpu_layers=-1, n_ctx=4096, main_gpu=0, verbose=False)
-GEM = Llama(model_path=pick_gguf(GEMMA_REPO), n_gpu_layers=-1, n_ctx=4096, main_gpu=1, verbose=False)
+print(f"\n=== load models (Qwythos GPU{QWY_GPU} ctx{QWY_CTX} | Gemma GPU{GEM_GPU} ctx{GEM_CTX}) ===", flush=True)
+QWY = Llama(model_path=pick_gguf(QWY_REPO),   n_gpu_layers=-1, n_ctx=QWY_CTX, main_gpu=QWY_GPU, verbose=False)
+GEM = Llama(model_path=pick_gguf(GEMMA_REPO), n_gpu_layers=-1, n_ctx=GEM_CTX, main_gpu=GEM_GPU, verbose=False)
 MODELS = {"qwythos": QWY, "gemma": GEM}
 
 def chat(key, system, user, max_tokens=1024, temp=0.2):
@@ -64,34 +76,28 @@ def target_file_from_patch(gold_patch):
     return m.group(1) if m else None
 
 def setup_repo(inst):
-    """clone @ base_commit, editable install. Returns repo_dir or raises (env failure)."""
-    rid = inst["instance_id"].replace("/", "__")
-    d = WORK / rid
+    rid = inst["instance_id"].replace("/", "__"); d = WORK / rid
     if d.exists(): shutil.rmtree(d)
-    url = f"https://github.com/{inst['repo']}.git"
-    sh(f"git clone -q {url} {d}", check=True, timeout=300)
+    sh(f"git clone -q https://github.com/{inst['repo']}.git {d}", check=True, timeout=300)
     sh(f"git -C {d} checkout -q {inst['base_commit']}", check=True, timeout=120)
-    sh(f"pip -q install -e {d} 2>/dev/null || true", timeout=600)  # best-effort dep install
+    sh(f"pip -q install -e {d} 2>/dev/null || true", timeout=600)
     return d
 
 def run_tests(repo_dir, fail_to_pass):
-    """CHECK-A: run the FAIL_TO_PASS tests. Pass iff all selected tests pass."""
     tests = json.loads(fail_to_pass) if isinstance(fail_to_pass, str) else fail_to_pass
     if not tests: return False, "no FAIL_TO_PASS tests"
     r = subprocess.run([sys.executable, "-m", "pytest", "-x", "-q", *tests],
                        cwd=repo_dir, capture_output=True, text=True, timeout=600)
-    ok = (r.returncode == 0)
-    return ok, ("" if ok else (r.stdout + r.stderr)[-600:])
+    return (r.returncode == 0), ("" if r.returncode == 0 else (r.stdout + r.stderr)[-600:])
 
 def solve(inst, repo_dir):
-    tgt = target_file_from_patch(inst["patch"])          # the file the gold patch touches
+    tgt = target_file_from_patch(inst["patch"])
     if not tgt: return False, [{"err": "no target file in gold patch"}]
-    fpath = repo_dir / tgt
-    issue = inst["problem_statement"][:3000]
+    fpath = repo_dir / tgt; issue = inst["problem_statement"][:3000]
     planner, doer = "gemma", "qwythos"; fails, hint, trace = 0, None, []
     plan = chat(planner, PLANNER_SYS, f"Issue:\n{issue}\n\nFile {tgt}:\n{read(fpath)[:4000]}", 400)
     while True:
-        u = (f"Issue:\n{issue}\n\nFile {tgt}:\n{read(fpath)[:6000]}\n\nPlan:\n{plan}")
+        u = f"Issue:\n{issue}\n\nFile {tgt}:\n{read(fpath)[:6000]}\n\nPlan:\n{plan}"
         if hint: u += f"\n\nPrevious edit FAILED:\n{hint}\nFix it."
         block = chat(doer, DOER_SYS, u, 800)
         orig = read(fpath); new, aerr = apply_search_replace(orig, block)
@@ -100,7 +106,7 @@ def solve(inst, repo_dir):
         else:
             fpath.write_text(new, encoding="utf-8")
             ok, err = run_tests(repo_dir, inst["FAIL_TO_PASS"])
-            if not ok: fpath.write_text(orig, encoding="utf-8")  # revert failed edit
+            if not ok: fpath.write_text(orig, encoding="utf-8")
         trace.append({"doer": doer, "planner": planner, "ok": ok, "err": err[:150]})
         if ok: return True, trace
         fails += 1; hint = err
