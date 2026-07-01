@@ -10,11 +10,12 @@
 import os, re, subprocess, sys, json, time, shutil, pathlib
 
 # ---------------- CONFIG ----------------
-# Context (MEASURED on Kaggle P100-16GB; KV cache offloads to ~29GB CPU RAM):
-#   Qwythos loads @ 131072 (128k) ✓, fails @ 200000.  Gemma loads @ 16384 (16k) ✓, fails @ 32768.
-# These are the proven ceilings. 256k needs an 80GB A100/H100.
-QWY_CTX   = int(os.environ.get("QWY_CTX", "131072"))
-GEM_CTX   = int(os.environ.get("GEM_CTX", "32768"))  # flash_attn on -> Gemma goes higher than 16k
+# Context = CAP for the auto-max loader (load_max tries this, steps down until it fits).
+# KV cache offloads to ~29GB CPU RAM. On T4x2 each model owns a 15GB GPU (more headroom than
+# the shared-P100 probe). Measured: Qwythos fits ~128k (fails @200k); Gemma w/ flash_attn higher.
+# 256k needs an 80GB A100/H100. Raise caps freely — loader falls back safely if too high.
+QWY_CTX   = int(os.environ.get("QWY_CTX", "131072"))   # cap; loader finds max <= this
+GEM_CTX   = int(os.environ.get("GEM_CTX", "65536"))    # cap; flash_attn lets Gemma climb on its own GPU
 N_INST    = int(os.environ.get("N_INST", "10"))
 RUN_ID    = os.environ.get("RUN_ID", "dynamic-couple-1")
 SUBSET    = os.environ.get("SWE_SUBSET", "swe-bench_lite")
@@ -51,10 +52,23 @@ def pick_gguf(repo, prefer="q4_k_m"):
     pick = (pref or fs)[0]; print("  ", repo, "->", pick, flush=True)
     return hf_hub_download(repo, pick)
 
-print(f"\n=== load (Qwythos GPU{QWY_GPU} ctx{QWY_CTX} | Gemma GPU{GEM_GPU} ctx{GEM_CTX}) ===", flush=True)
-QWY = Llama(model_path=pick_gguf(QWY_REPO),   n_gpu_layers=-1, n_ctx=QWY_CTX, main_gpu=QWY_GPU, verbose=False)
-GEM = Llama(model_path=pick_gguf(GEMMA_REPO), n_gpu_layers=-1, n_ctx=GEM_CTX, main_gpu=GEM_GPU,
-            flash_attn=True, verbose=False)  # flash_attn shrinks Gemma iSWA KV cache -> higher ctx
+def load_max(repo, gpu, cap, **kw):
+    """Load at the MAX context that fits: try `cap`, step down until it loads. KV offloads to
+    CPU RAM so ceiling is RAM-bound; auto-fallback means it never hard-crashes on the accelerator."""
+    path = pick_gguf(repo)
+    ladder = [c for c in (cap, 131072, 98304, 65536, 49152, 32768, 16384, 8192, 4096) if c <= cap]
+    for ctx in dict.fromkeys(ladder):  # dedupe, keep order
+        try:
+            m = Llama(model_path=path, n_gpu_layers=-1, n_ctx=ctx, main_gpu=gpu, **kw)
+            print(f"  {repo.split('/')[-1]} LOADED @ ctx={ctx} on GPU{gpu}", flush=True)
+            return m
+        except Exception as e:
+            print(f"  {repo.split('/')[-1]} ctx={ctx} failed ({str(e)[:60]}) -> stepping down", flush=True)
+    raise RuntimeError(f"could not load {repo} at any context")
+
+print(f"\n=== load at MAX possible ctx (Qwythos GPU{QWY_GPU} cap{QWY_CTX} | Gemma GPU{GEM_GPU} cap{GEM_CTX}) ===", flush=True)
+QWY = load_max(QWY_REPO, QWY_GPU, QWY_CTX)                      # Qwythos: 1M-ctx GGUF, ~128k fits
+GEM = load_max(GEMMA_REPO, GEM_GPU, GEM_CTX, flash_attn=True)   # flash_attn shrinks Gemma iSWA KV cache
 MODELS = {"qwythos": QWY, "gemma": GEM}
 
 def chat(key, system, user, max_tokens=1024, temp=0.2):
