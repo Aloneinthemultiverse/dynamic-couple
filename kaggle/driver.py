@@ -14,7 +14,7 @@ import os, re, subprocess, sys, json, time, shutil, pathlib
 #   Qwythos loads @ 131072 (128k) ✓, fails @ 200000.  Gemma loads @ 16384 (16k) ✓, fails @ 32768.
 # These are the proven ceilings. 256k needs an 80GB A100/H100.
 QWY_CTX   = int(os.environ.get("QWY_CTX", "131072"))
-GEM_CTX   = int(os.environ.get("GEM_CTX", "16384"))
+GEM_CTX   = int(os.environ.get("GEM_CTX", "32768"))  # flash_attn on -> Gemma goes higher than 16k
 N_INST    = int(os.environ.get("N_INST", "10"))
 RUN_ID    = os.environ.get("RUN_ID", "dynamic-couple-1")
 SUBSET    = os.environ.get("SWE_SUBSET", "swe-bench_lite")
@@ -22,7 +22,10 @@ QWY_REPO  = os.environ.get("QWY_REPO",   "empero-ai/Qwythos-9B-Claude-Mythos-5-1
 GEMMA_REPO= os.environ.get("GEMMA_REPO", "ggml-org/gemma-4-12B-it-GGUF")
 # ----------------------------------------
 
-assert os.environ.get("SWEBENCH_API_KEY"), "Set SWEBENCH_API_KEY (Kaggle Secret) before running."
+HAVE_KEY = bool(os.environ.get("SWEBENCH_API_KEY"))
+if not HAVE_KEY:
+    print("!! SWEBENCH_API_KEY not set — couple will RUN and generate patches, but cloud "
+          "scoring is skipped. Add it as a Kaggle Secret to submit.", flush=True)
 
 def sh(c, **k): print("$", c, flush=True); return subprocess.run(c, shell=True, **k)
 
@@ -50,7 +53,8 @@ def pick_gguf(repo, prefer="q4_k_m"):
 
 print(f"\n=== load (Qwythos GPU{QWY_GPU} ctx{QWY_CTX} | Gemma GPU{GEM_GPU} ctx{GEM_CTX}) ===", flush=True)
 QWY = Llama(model_path=pick_gguf(QWY_REPO),   n_gpu_layers=-1, n_ctx=QWY_CTX, main_gpu=QWY_GPU, verbose=False)
-GEM = Llama(model_path=pick_gguf(GEMMA_REPO), n_gpu_layers=-1, n_ctx=GEM_CTX, main_gpu=GEM_GPU, verbose=False)
+GEM = Llama(model_path=pick_gguf(GEMMA_REPO), n_gpu_layers=-1, n_ctx=GEM_CTX, main_gpu=GEM_GPU,
+            flash_attn=True, verbose=False)  # flash_attn shrinks Gemma iSWA KV cache -> higher ctx
 MODELS = {"qwythos": QWY, "gemma": GEM}
 
 def chat(key, system, user, max_tokens=1024, temp=0.2):
@@ -139,12 +143,16 @@ with open(preds_path, "w") as pf:
 
 print(f"\n=== {nonempty}/{N_INST} non-empty patches | swaps on {swaps} | {time.time()-t0:.0f}s ===", flush=True)
 
-print("\n=== submit to SWE-bench cloud (sb-cli) ===", flush=True)
-sh(f"sb-cli submit {SUBSET} test --predictions_path {preds_path} --run_id {RUN_ID} "
-   f"--wait 2>&1 || sb-cli submit {SUBSET} test --predictions_path {preds_path} --run_id {RUN_ID}")
-print("\n=== report ===", flush=True)
-sh(f"sb-cli get-report {SUBSET} test --run_id {RUN_ID} -o /kaggle/working/report.json 2>&1")
-try:
-    print(json.dumps(json.load(open("/kaggle/working/report.json")), indent=2)[:2000], flush=True)
-except Exception as e:
-    print("report not ready yet:", e, "-> fetch later with sb-cli get-report", flush=True)
+if HAVE_KEY:
+    print("\n=== submit to SWE-bench cloud (sb-cli) ===", flush=True)
+    sh(f"sb-cli submit {SUBSET} test --predictions_path {preds_path} --run_id {RUN_ID} "
+       f"--wait 2>&1 || sb-cli submit {SUBSET} test --predictions_path {preds_path} --run_id {RUN_ID}")
+    print("\n=== report ===", flush=True)
+    sh(f"sb-cli get-report {SUBSET} test --run_id {RUN_ID} -o /kaggle/working/report.json 2>&1")
+    try:
+        print(json.dumps(json.load(open("/kaggle/working/report.json")), indent=2)[:2000], flush=True)
+    except Exception as e:
+        print("report not ready yet:", e, "-> fetch later with sb-cli get-report", flush=True)
+else:
+    print("\n=== cloud submit SKIPPED (no key). Patches saved to", preds_path,
+          "— add SWEBENCH_API_KEY and re-run to score. ===", flush=True)
