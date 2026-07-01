@@ -10,10 +10,11 @@
 import os, re, subprocess, sys, json, time, shutil, pathlib
 
 # ---------------- CONFIG ----------------
-# Context on 15GB T4: KV cache grows with ctx. Gemma OOMs above ~4k, Qwythos ~8k. 256k needs
-# an 80GB A100/H100, NOT a T4. Raise only on bigger GPUs.
-QWY_CTX   = int(os.environ.get("QWY_CTX", "8192"))
-GEM_CTX   = int(os.environ.get("GEM_CTX", "4096"))
+# Context (MEASURED on Kaggle P100-16GB; KV cache offloads to ~29GB CPU RAM):
+#   Qwythos loads @ 131072 (128k) ✓, fails @ 200000.  Gemma loads @ 16384 (16k) ✓, fails @ 32768.
+# These are the proven ceilings. 256k needs an 80GB A100/H100.
+QWY_CTX   = int(os.environ.get("QWY_CTX", "131072"))
+GEM_CTX   = int(os.environ.get("GEM_CTX", "16384"))
 N_INST    = int(os.environ.get("N_INST", "10"))
 RUN_ID    = os.environ.get("RUN_ID", "dynamic-couple-1")
 SUBSET    = os.environ.get("SWE_SUBSET", "swe-bench_lite")
