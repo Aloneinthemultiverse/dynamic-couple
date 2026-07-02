@@ -1,7 +1,7 @@
 # Dynamic couple config. Override per-env in local.yaml.
 roles:
-  planner: gemma       # starts as PLANNER (native thinking + multi-step tool calls)
-  doer: qwythos        # starts as DOER (Python-tuned, 1M ctx, uncensored)
+  planner: qwythos     # starts as PLANNER/REASONER (+34 MMLU/+30 GSM8K, 1M ctx)
+  doer: ornith         # starts as DOER (Ornith-1.0-9B: SOTA agentic coder, 69.4% SWE-V solo)
   swap_on_fails: 2     # arbiter: retry-once then swap
   bail_on_fails: 3
 
@@ -10,8 +10,8 @@ models:
     repo: empero-ai/Qwythos-9B-Claude-Mythos-5-1M-GGUF   # GGUF from HF at runtime
     gpu: 0
     quant: q4
-  gemma:
-    repo: ggml-org/gemma-4-12B-it-GGUF                    # GGUF from HF at runtime
+  ornith:
+    repo: deepreinforce-ai/Ornith-1.0-9B-GGUF             # GGUF from HF at runtime (Qwen3.5 base)
     gpu: 1
     quant: q4
 

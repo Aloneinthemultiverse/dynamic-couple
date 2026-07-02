@@ -1,5 +1,5 @@
 # dynamic-couple | Kaggle T4x2 — couple loop -> SWE-bench Lite CLOUD eval (sb-cli)
-# Gemma 4 12B = PLANNER, Qwythos-9B = DOER. Roles SWAP on double-fail.
+# Qwythos-9B = PLANNER/REASONER, Ornith-1.0-9B = DOER. Roles SWAP on double-fail.
 # GPU produces patches; SWE-bench CLOUD does official scoring (no local Docker/pytest).
 #
 # SECRET: set SWEBENCH_API_KEY as a Kaggle Secret (Add-ons -> Secrets) or env var.
@@ -11,16 +11,16 @@ import os, re, subprocess, sys, json, time, shutil, pathlib
 
 # ---------------- CONFIG ----------------
 # Context = CAP for the auto-max loader (load_max tries this, steps down until it fits).
-# KV cache offloads to ~29GB CPU RAM. On T4x2 each model owns a 15GB GPU (more headroom than
-# the shared-P100 probe). Measured: Qwythos fits ~128k (fails @200k); Gemma w/ flash_attn higher.
+# KV cache offloads to ~29GB CPU RAM. On T4x2 each model owns a 15GB GPU. Measured: Qwythos
+# fits ~128k (fails @200k). Ornith is Qwen3.5-based — same ladder applies; loader finds its max.
 # 256k needs an 80GB A100/H100. Raise caps freely — loader falls back safely if too high.
 QWY_CTX   = int(os.environ.get("QWY_CTX", "131072"))   # cap; loader finds max <= this
-GEM_CTX   = int(os.environ.get("GEM_CTX", "65536"))    # cap; flash_attn lets Gemma climb on its own GPU
+ORN_CTX   = int(os.environ.get("ORN_CTX", "131072"))   # cap; loader finds max <= this
 N_INST    = int(os.environ.get("N_INST", "10"))
 RUN_ID    = os.environ.get("RUN_ID", "dynamic-couple-1")
 SUBSET    = os.environ.get("SWE_SUBSET", "swe-bench_lite")
-QWY_REPO  = os.environ.get("QWY_REPO",   "empero-ai/Qwythos-9B-Claude-Mythos-5-1M-GGUF")
-GEMMA_REPO= os.environ.get("GEMMA_REPO", "ggml-org/gemma-4-12B-it-GGUF")
+QWY_REPO  = os.environ.get("QWY_REPO", "empero-ai/Qwythos-9B-Claude-Mythos-5-1M-GGUF")
+ORN_REPO  = os.environ.get("ORN_REPO", "deepreinforce-ai/Ornith-1.0-9B-GGUF")
 # ----------------------------------------
 
 HAVE_KEY = bool(os.environ.get("SWEBENCH_API_KEY"))
@@ -33,7 +33,7 @@ def sh(c, **k): print("$", c, flush=True); return subprocess.run(c, shell=True, 
 print("=== GPU ===", flush=True)
 gpus = sh("nvidia-smi -L", capture_output=True, text=True).stdout
 n_gpu = len([l for l in gpus.splitlines() if l.strip()]); print(gpus, f"-> {n_gpu} GPU", flush=True)
-QWY_GPU, GEM_GPU = (0, 1) if n_gpu >= 2 else (0, 0)
+QWY_GPU, ORN_GPU = (0, 1) if n_gpu >= 2 else (0, 0)
 
 print("\n=== install ===", flush=True)
 sh("pip -q install huggingface_hub datasets sb-cli")
@@ -66,16 +66,20 @@ def load_max(repo, gpu, cap, **kw):
             print(f"  {repo.split('/')[-1]} ctx={ctx} failed ({str(e)[:60]}) -> stepping down", flush=True)
     raise RuntimeError(f"could not load {repo} at any context")
 
-print(f"\n=== load at MAX possible ctx (Qwythos GPU{QWY_GPU} cap{QWY_CTX} | Gemma GPU{GEM_GPU} cap{GEM_CTX}) ===", flush=True)
-QWY = load_max(QWY_REPO, QWY_GPU, QWY_CTX)                      # Qwythos: 1M-ctx GGUF, ~128k fits
-GEM = load_max(GEMMA_REPO, GEM_GPU, GEM_CTX, flash_attn=True)   # flash_attn shrinks Gemma iSWA KV cache
-MODELS = {"qwythos": QWY, "gemma": GEM}
+print(f"\n=== load at MAX possible ctx (Qwythos GPU{QWY_GPU} cap{QWY_CTX} | Ornith GPU{ORN_GPU} cap{ORN_CTX}) ===", flush=True)
+QWY = load_max(QWY_REPO, QWY_GPU, QWY_CTX, flash_attn=True)  # Qwythos: 1M-ctx GGUF, ~128k fits
+ORN = load_max(ORN_REPO, ORN_GPU, ORN_CTX, flash_attn=True)  # Ornith: Qwen3.5-based reasoning coder
+MODELS = {"qwythos": QWY, "ornith": ORN}
+
+def strip_think(text):
+    """Both are <think>-first reasoning models; drop the think block before parsing output."""
+    return re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
 
 def chat(key, system, user, max_tokens=1024, temp=0.2):
     o = MODELS[key].create_chat_completion(
         messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
         max_tokens=max_tokens, temperature=temp)
-    return o["choices"][0]["message"]["content"]
+    return strip_think(o["choices"][0]["message"]["content"])
 
 PLANNER_SYS = ("You are the PLANNER in a two-model coding couple fixing a real bug. Given an "
                "issue and the relevant file, output a SHORT numbered plan (3-5 steps) naming the "
@@ -114,7 +118,7 @@ def make_patch(inst, repo_dir):
     tgt = target_file(inst["patch"])
     if not tgt: return "", [{"err": "no target file"}]
     fpath = repo_dir / tgt; issue = inst["problem_statement"][:3000]
-    planner, doer = "gemma", "qwythos"; fails, hint, trace = 0, None, []
+    planner, doer = "qwythos", "ornith"; fails, hint, trace = 0, None, []  # Qwythos reasons, Ornith codes
     plan = chat(planner, PLANNER_SYS, f"Issue:\n{issue}\n\nFile {tgt}:\n{read(fpath)[:4000]}", 400)
     while True:
         u = f"Issue:\n{issue}\n\nFile {tgt}:\n{read(fpath)[:6000]}\n\nPlan:\n{plan}"
@@ -148,7 +152,7 @@ with open(preds_path, "w") as pf:
             rd = setup_repo(inst); patch, trace = make_patch(inst, rd)
         except Exception as e:
             patch, trace = "", [{"err": f"crash: {e}"}]
-        used_swap = any(t.get("planner") == "qwythos" for t in trace)
+        used_swap = any(t.get("planner") == "ornith" for t in trace)
         swaps += int(used_swap); nonempty += int(bool(patch.strip()))
         pf.write(json.dumps({"instance_id": iid, "model_patch": patch,
                              "model_name_or_path": "dynamic-couple"}) + "\n")
